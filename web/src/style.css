@@ -1,0 +1,14 @@
+@import 'tailwindcss';
+
+/* Tailwind's preflight already zeroes margins, sets box-sizing, and makes
+   <canvas> display:block. We only need the root elements to fill the viewport
+   and prevent scrollbars around the full-window game canvas. */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- TEMP diagnostic page (safe to delete). Renders one real goal from Goal.ts. -->
+<html>
+  <head><meta charset="utf-8" /><style>html,body{margin:0;background:#87ceeb}</style></head>
+  <body>
+    <canvas id="c" style="width:100vw;height:100vh;display:block"></canvas>
+    <script type="module">
+      import {
+        Scene, PerspectiveCamera, WebGLRenderer, Color,
+        AmbientLight, DirectionalLight, Mesh, PlaneGeometry, MeshStandardMaterial,
+      } from 'three'
+      import { createGoal } from './src/game/Goal.ts'
+
+      // Distance from the goal line: #near (8m) or #far (85m, the broadcast gap).
+      const far = location.hash === '#far'
+      const dist = far ? 85 : 8
+
+      const canvas = document.getElementById('c')
+      const renderer = new WebGLRenderer({ canvas, antialias: true })
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+      renderer.setSize(innerWidth, innerHeight)
+
+      const scene = new Scene()
+      scene.background = new Color(0x87ceeb)
+      scene.add(new AmbientLight(0xffffff, 0.7))
+      const sun = new DirectionalLight(0xffffff, 1.1); sun.position.set(20, 40, 10); scene.add(sun)
+
+      const ground = new Mesh(new PlaneGeometry(60, 60), new MeshStandardMaterial({ color: 0x2f7d32 }))
+      ground.rotation.x = -Math.PI / 2; scene.add(ground)
+
+      const goal = createGoal(); scene.add(goal.group) // goal line at x=0, net trails +x
+
+      // Look at the net from the front-ish, slightly elevated, matching the
+      // broadcast camera's downward angle when far.
+      const cam = new PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 1000)
+      const h = far ? 35 : 3
+      cam.position.set(-dist, h, 4)
+      cam.lookAt(1, 1.2, 0)
+
+      renderer.render(scene, cam)
+      // a couple more frames after textures settle
+      requestAnimationFrame(() => renderer.render(scene, cam))
+    </script>
+  </body>
+</html>
