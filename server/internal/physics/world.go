@@ -182,13 +182,14 @@ func (w *World) stepDribble(in Input, dt float64) {
 
 	// A touch needs a moving owner. (A stationary owner lets the ball settle at
 	// the feet.) Two ways to touch:
-	//   - catch-up: the foot has reached a ball that's ahead (within touchReach),
-	//     paced by the anti-jitter cooldown — this is the straight-line cadence.
-	//   - turn: the ball has drifted off the new facing (a change of direction)
-	//     and is still within turnReach to be reached. This is what redirects the
-	//     ball on a cut; it bypasses the cooldown so the touch is immediate, but
-	//     only fires while the ball is reachable — knock it too far (a sprint
-	//     push) and a turn simply can't get to it, so you lose it.
+	//   - running close: while running within touchReach of the ball, the owner
+	//     keeps knocking it along their running direction, paced by the anti-jitter
+	//     cooldown — so a ball at the feet always travels where the player heads,
+	//     and gradual curves are continuously re-aimed, not just sharp cuts.
+	//   - turn: a sharp change of direction redirects a ball that's a bit further
+	//     out (within turnReach) — bypassing the cooldown so the cut is immediate,
+	//     but only while the ball is reachable. Knock it too far (a sprint push)
+	//     and a turn can't get to it, so you lose it.
 	speed := owner.Vel.LengthXZ()
 	if speed <= epsilon {
 		return
@@ -205,16 +206,21 @@ func (w *World) stepDribble(in Input, dt float64) {
 		owner.Facing.DotXZ(w.dribbleFacing) < touchTurnAngleCos
 	w.dribbleFacing = owner.Facing
 
-	caughtUp := w.touchCooldown <= 0 && dist <= touchReach
+	runningClose := w.touchCooldown <= 0 && dist <= touchReach
 	turned := turnedNow && dist <= turnReach
-	if !caughtUp && !turned {
+	if !runningClose && !turned {
 		return
 	}
 
-	// Knock the ball toward a point ahead of the feet along the CURRENT facing, so
-	// the touch both pushes it forward and (after a turn) curls it back in front
-	// of the player rather than leaving it running off to the side.
-	target := owner.Pos.Add(owner.Facing.Scale(knockAhead))
+	// Knock the ball toward a point a little further ahead than it already is,
+	// along the CURRENT (running) facing. The forward component always pushes the
+	// ball where the player is heading; the sideways component curls a ball that's
+	// drifted off-centre (e.g. after a turn) back in front instead of leaving it
+	// running parallel. Anchoring the target to the ball's own ahead-distance —
+	// rather than a fixed point off the feet — means we never aim *behind* a ball
+	// that's sitting further out than that point, so a touch is never backwards.
+	ahead := rel.DotXZ(owner.Facing) // signed distance the ball is ahead of the feet
+	target := owner.Pos.Add(owner.Facing.Scale(ahead + knockAhead))
 	dir := target.Sub(w.Ball.Pos).NormalizedXZ()
 	if dir.LengthXZ() < epsilon {
 		dir = owner.Facing

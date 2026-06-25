@@ -101,17 +101,21 @@ func sprintLooseness(dribbling int) float64 {
 
 // Touch-based dribbling. Rather than gluing the ball to an ideal point, the owner
 // knocks it forward in discrete TOUCHES: between touches the ball just rolls
-// under dribbleRollDrag and the owner runs after it. A touch fires only once the
-// foot has REACHED the ball (within touchReach) — so the ball only ever changes
-// direction on a touch, never the instant the player turns. minTouchInterval
-// paces touches so a player sitting on the ball doesn't re-touch every frame.
+// under dribbleRollDrag while the owner runs with it. Whenever the owner is
+// running CLOSE to the ball (within touchReach) they keep knocking it along their
+// running direction — so the ball always travels where the player is heading,
+// never lagging untouched behind them. A direction change still only takes effect
+// on a touch (the ball only changes course when a foot meets it), and a far ball
+// (a heavy sprint push, within turnReach) can be reached on the turn but not once
+// it's gone. minTouchInterval paces the knocks so the foot doesn't fire every
+// frame; the ball only ever runs away when knocked beyond touchReach (a sprint).
 const (
 	dribbleRollDrag   = 2.4  // per-second ground drag on the ball while being dribbled
-	touchReach        = 0.55 // foot within this (m) of the ball → a catch-up touch
-	turnReach         = 1.0  // ...and within this (m) a direction change can touch it the new way
+	touchReach        = 0.8  // running this close (m) to the ball → keep knocking it forward
+	turnReach         = 1.0  // ...and within this (m) a direction change can still reach it
 	touchTurnAngleCos = 0.82 // ball counts as "off the new facing" past ~35° (cosine)
-	knockAhead        = 0.6  // a touch aims the ball to this far ahead of the feet
-	minTouchInterval  = 0.12 // minimum seconds between catch-up touches (anti-jitter)
+	knockAhead        = 0.6  // a touch aims the ball this much further ahead of where it is
+	minTouchInterval  = 0.16 // minimum seconds between catch-up touches (anti-jitter)
 )
 
 // A touch launches the ball to a multiple of the owner's speed so it pulls ahead,
