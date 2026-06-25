@@ -26,6 +26,14 @@ type Snapshot struct {
 	Players []PlayerState `json:"players"`
 	Touch   int           `json:"touch"` // monotonic dribble-touch count; clients diff it to animate touches
 	Kick    int           `json:"kick"`  // monotonic kick count; clients diff it to animate/sfx a kick
+
+	// Out-of-bounds restarts and the score. Restart is a monotonic counter clients
+	// diff to detect a fresh out-of-bounds event; RestartKind names the most recent
+	// one ("throwin" | "goalkick" | "corner" | "goal" | "" before any).
+	Restart     int    `json:"restart"`
+	RestartKind string `json:"restartKind"`
+	ScoreHome   int    `json:"scoreHome"` // goals for the Home (+X) side
+	ScoreAway   int    `json:"scoreAway"` // goals for the Away (-X) side
 }
 
 // BallState is the ball's world position. Y is height (a lofted ball arcs above

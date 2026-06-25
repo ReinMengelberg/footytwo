@@ -86,6 +86,19 @@ type World struct {
 
 	pending PendingAction // 1-deep action register: the queued touch (later: pass/shot)
 	atFeet  bool          // ball within touchFireRadius of the owner this tick (snapshot contact flag)
+
+	// Out-of-bounds / restart bookkeeping (see restart.go). lastTouch records the
+	// last player to play the ball so a goal-line exit can be told apart (corner vs
+	// goal kick); the rest is surfaced to clients to announce restarts and the score.
+	lastTouch            string      // ID of the last player to touch the ball
+	restartCount         int         // monotonic count of restarts awarded (out-of-bounds events)
+	lastRestart          RestartKind // kind of the most recent restart
+	scoreHome, scoreAway int         // goals for the Home (+X) and Away (-X) sides
+
+	// Dead-ball pause: while restartTimer > 0 the ball is frozen out of play and
+	// will be placed at restartSpot when it elapses (set by beginRestart).
+	restartTimer float64 // seconds left in the post-out pause (0 = ball in play)
+	restartSpot  Vec3    // where the ball is placed when the pause ends
 }
 
 // TouchCount returns the running total of dribble touches taken in this world. It
@@ -154,7 +167,24 @@ func (w *World) Step(inputs map[string]Input, dt float64) {
 		w.stepPlayer(p, inputs[id], id == w.Owner, dt)
 	}
 
+	// Dead-ball pause after the ball goes out (see ResolveRestart): no possession or
+	// kicks, but the ball keeps rolling on out of play (into the net / onto the turf)
+	// so the exit is visible, kept on the field by clampDeadBall. Players still move;
+	// the pause timer is counted down by ResolveRestart, not here.
+	if w.restartTimer > 0 {
+		w.stepFreeBall(dt)
+		w.clampDeadBall()
+		return
+	}
+
 	w.tryGainPossession()
+
+	// The owner is in continuous contact with the ball, so they're the last to
+	// have touched it (a first-time strike on a loose ball records itself, in
+	// tryGainPossession). This decides corner vs goal kick if it later goes out.
+	if w.Owner != "" {
+		w.lastTouch = w.Owner
+	}
 
 	// Process kick charging after possession is resolved (so "possessing" is
 	// current) and before the dribble step (so a kick committed on release this
@@ -212,6 +242,7 @@ func (w *World) tryGainPossession() {
 				w.launchKick(p, p.kick)
 				p.kick = PendingAction{}
 				w.kickCount++
+				w.lastTouch = id // a first-time strike is this player's touch
 				w.gainCooldown = possessionGainCooldown
 				return
 			}
@@ -324,7 +355,8 @@ func (w *World) stepDribble(in Input, dt float64) {
 		BallRadius,
 		w.Ball.Pos.Z + w.Ball.Vel.Z*dt,
 	}
-	w.Ball.Pos = w.Bounds.Clamp(w.Ball.Pos)
+	// No bounds clamp here: a ball dribbled over a line goes out of play, caught by
+	// ResolveRestart (a throw-in or goal-line restart). Players still clamp to the pitch.
 
 	// Arm/refresh the pending touch from LIVE movement input (latest-input-wins).
 	// On a zero-input tick we keep the last committed direction so a momentary gap
@@ -466,6 +498,7 @@ func (w *World) stepFreeBall(dt float64) {
 	if math.Abs(b.Spin) < spinSettleCap {
 		b.Spin = 0
 	}
-
-	b.Pos = w.Bounds.Clamp(b.Pos)
+	// No bounds clamp: a free ball is allowed to cross a boundary line (and visibly
+	// run onto the surrounding turf) — ResolveRestart turns that into the right
+	// restart. Step stays pure flight so it can be unit-tested without a pitch edge.
 }

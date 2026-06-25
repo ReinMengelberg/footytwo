@@ -11,6 +11,7 @@ import "math"
 type Player struct {
 	ID     string
 	Name   string
+	Team   Team // which goal this player attacks; decides corner vs goal kick (see restart.go)
 	Stats  Stats
 	Pos    Vec3 // world position
 	Vel    Vec3 // current velocity (units/sec), X/Z plane

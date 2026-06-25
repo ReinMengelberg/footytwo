@@ -46,6 +46,7 @@ func NewDefaultRoom() *Room {
 	w.AddPlayer(physics.Player{
 		ID:   "p1",
 		Name: "Tryout",
+		Team: physics.TeamHome, // attacks the +X goal (see restart.go)
 		Stats: physics.Stats{
 			Pace: 78, Shooting: 70, Passing: 80,
 			Dribbling: 82, Defending: 65, Physical: 72,
@@ -117,6 +118,7 @@ func (r *Room) step(dt float64) {
 	r.inputMu.Unlock()
 
 	r.World.Step(inputs, dt)
+	r.World.ResolveRestart(dt) // enforce the lines: a ball that left the field pauses, then restarts
 	r.tick++
 
 	data, err := json.Marshal(r.snapshot())
@@ -144,13 +146,18 @@ func (r *Room) snapshot() proto.Snapshot {
 			ChargeLift:  p.ChargeLift(),
 		})
 	}
+	home, away := w.Score()
 	return proto.Snapshot{
-		Tick:    r.tick,
-		Owner:   w.Owner,
-		Ball:    proto.BallState{X: w.Ball.Pos.X, Y: w.Ball.Pos.Y, Z: w.Ball.Pos.Z, Spin: w.Ball.Spin},
-		Players: players,
-		Touch:   w.TouchCount(),
-		Kick:    w.KickCount(),
+		Tick:        r.tick,
+		Owner:       w.Owner,
+		Ball:        proto.BallState{X: w.Ball.Pos.X, Y: w.Ball.Pos.Y, Z: w.Ball.Pos.Z, Spin: w.Ball.Spin},
+		Players:     players,
+		Touch:       w.TouchCount(),
+		Kick:        w.KickCount(),
+		Restart:     w.RestartCount(),
+		RestartKind: w.LastRestart().String(),
+		ScoreHome:   home,
+		ScoreAway:   away,
 	}
 }
 

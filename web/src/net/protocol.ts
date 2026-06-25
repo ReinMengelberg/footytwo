@@ -38,4 +38,11 @@ export interface Snapshot {
   players: PlayerState[]
   touch: number // monotonic dribble-touch count; diff it between snapshots to animate touches
   kick: number // monotonic kick count; diff it between snapshots to animate/sfx a kick
+
+  // Out-of-bounds restarts and the score. `restart` is a monotonic counter; a rise
+  // means the ball just went out — `restartKind` names the call to announce.
+  restart: number
+  restartKind: '' | 'throwin' | 'goalkick' | 'corner' | 'goal'
+  scoreHome: number // goals for the Home (+X) side
+  scoreAway: number // goals for the Away (-X) side
 }
