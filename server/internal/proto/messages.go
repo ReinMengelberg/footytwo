@@ -38,5 +38,6 @@ type PlayerState struct {
 	Z          float64 `json:"z"`
 	FacingX    float64 `json:"facingX"`
 	FacingZ    float64 `json:"facingZ"`
-	Possessing bool    `json:"possessing"`
+	Possessing bool    `json:"possessing"` // owns the ball (sticky)
+	AtFeet     bool    `json:"atFeet"`     // ball at this player's feet this tick (pulses on contact)
 }

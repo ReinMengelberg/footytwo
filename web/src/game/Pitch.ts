@@ -50,7 +50,7 @@ export const GROUND_LENGTH = PITCH_LENGTH + PITCH_MARGIN * 2
 // density for a fuller look, drop it on weaker GPUs.
 const BLADE_WIDTH = 0.07
 const BLADE_HEIGHT = 0.2
-const GRASS_DENSITY = 0 / (PITCH_WIDTH * PITCH_LENGTH) // blades per m²
+const GRASS_DENSITY = 50000 / (PITCH_WIDTH * PITCH_LENGTH) // blades per m²
 const GRASS_COUNT = Math.round(GRASS_DENSITY * GROUND_WIDTH * GROUND_LENGTH)
 
 export interface Pitch {

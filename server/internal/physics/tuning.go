@@ -100,23 +100,43 @@ func sprintLooseness(dribbling int) float64 {
 }
 
 // Touch-based dribbling. Rather than gluing the ball to an ideal point, the owner
-// knocks it forward in discrete TOUCHES: between touches the ball just rolls
-// under dribbleRollDrag while the owner runs with it. Whenever the owner is
-// running CLOSE to the ball (within touchReach) they keep knocking it along their
-// running direction — so the ball always travels where the player is heading,
-// never lagging untouched behind them. A direction change still only takes effect
-// on a touch (the ball only changes course when a foot meets it), and a far ball
-// (a heavy sprint push, within turnReach) can be reached on the turn but not once
-// it's gone. minTouchInterval paces the knocks so the foot doesn't fire every
-// frame; the ball only ever runs away when knocked beyond touchReach (a sprint).
+// knocks it forward in discrete TOUCHES: between touches the ball just rolls under
+// dribbleRollDrag while the owner runs after it, and the queued (most-recent-input)
+// direction decides where the next touch sends it. The control objective is to keep
+// the ball IN FRONT of the player along that direction: a touch fires whenever the
+// ball's lead drops below frontMin, knocking it back out to ~knockAhead in front, so
+// the ball follows you and a turn redirects it on the next touch.
+//
+// Crucially, you only keep the ball while you're heading TOWARD it. You can only
+// steer a ROLLING ball within a cone of its own travel: the move direction must be
+// within ~acos(towardMin) of the ball's velocity. Turn sharper than that and you're
+// moving AWAY from the ball — the touch doesn't reach it, its momentum carries it
+// off, and possession is lost once it passes loseReach. A SLOW ball (slower than
+// slowBallCap: at the feet, under control) escapes that cone and can be knocked any
+// direction, which is what lets you start dribbling and play tight cuts. So:
+// possession is conservative — dribble with the ball and it stays in front; turn and
+// run away from it and you lose it. A SPRINT touch is heavy enough to knock the ball
+// past loseReach by itself, so it also loses it.
+//
+// touchFireRadius (used only for the at-the-feet snapshot flag) sits just above
+// ControlRadius so a freshly corralled ball reads as at the feet immediately.
 const (
-	dribbleRollDrag   = 2.4  // per-second ground drag on the ball while being dribbled
-	touchReach        = 0.8  // running this close (m) to the ball → keep knocking it forward
-	turnReach         = 1.0  // ...and within this (m) a direction change can still reach it
-	touchTurnAngleCos = 0.82 // ball counts as "off the new facing" past ~35° (cosine)
-	knockAhead        = 0.6  // a touch aims the ball this much further ahead of where it is
-	minTouchInterval  = 0.16 // minimum seconds between catch-up touches (anti-jitter)
+	dribbleRollDrag = 2.4  // per-second ground drag on the ball while being dribbled
+	knockAhead      = 0.6  // a touch aims the ball this much further ahead of the feet
+	frontMin        = 0.6  // re-knock once the ball's lead along the move dir drops below this (m)
+	towardMin       = 0.3  // move dir must be within ~acos(0.3)≈72° of a rolling ball's travel to steer it
+	slowBallCap     = 1.5  // a ball slower than this (m/s) is "at the feet" and can be knocked any direction
+	touchReach      = 1.0  // a touch can only reach the ball within this distance (m)
+	loseReach       = 1.3  // beyond this (m) the ball is out of control — possession is lost
+	touchFireRadius = 0.65 // ball within this (m) of the feet reads as "at the feet" (snapshot flag only)
 )
+
+// pendingActionMaxAge bounds how long a queued action (a touch now, a pass/shot
+// later) lives unrefreshed before it times out and is discarded. A dribble touch
+// is re-armed from live input every tick so it never expires; the timeout exists
+// for future one-shot actions that can't be executed because the ball never
+// returns to the feet.
+const pendingActionMaxAge = 0.5 // seconds
 
 // A touch launches the ball to a multiple of the owner's speed so it pulls ahead,
 // then drag and the chasing owner bring it back into reach. Kept gentle at a jog

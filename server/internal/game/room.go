@@ -138,6 +138,7 @@ func (r *Room) snapshot() proto.Snapshot {
 			FacingX:    p.Facing.X,
 			FacingZ:    p.Facing.Z,
 			Possessing: w.Owner == id,
+			AtFeet:     w.Owner == id && w.AtFeet(),
 		})
 	}
 	return proto.Snapshot{

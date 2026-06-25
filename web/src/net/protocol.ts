@@ -20,7 +20,8 @@ export interface PlayerState {
   z: number
   facingX: number
   facingZ: number
-  possessing: boolean
+  possessing: boolean // owns the ball (sticky)
+  atFeet: boolean // ball at this player's feet this tick (pulses on contact)
 }
 
 export interface Snapshot {

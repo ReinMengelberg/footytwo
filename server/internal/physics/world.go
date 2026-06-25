@@ -35,6 +35,31 @@ type Input struct {
 	Sprint bool // hold to sprint (top speed, looser control with the ball)
 }
 
+// ActionKind enumerates the queued ball actions a player can have pending. Only
+// ActionTouch exists today; ActionPass and ActionShot are reserved so the
+// pending-action slot is the future home for queued kicks — they resolve through
+// the same "execute on the next contact" path the dribble touch uses.
+type ActionKind uint8
+
+const (
+	ActionNone ActionKind = iota
+	ActionTouch
+	// ActionPass, ActionShot — later phases, once pass/shot inputs exist.
+)
+
+// PendingAction is the 1-deep action register: the most recent committed intent
+// awaiting execution at the owner's feet. It is cleared on three events —
+// execution, timeout (Age >= pendingActionMaxAge), and loss of possession. For a
+// dribble touch the slot is continuously re-armed from live movement input each
+// tick (latest-input-wins), so its Dir is just the current heading and it never
+// times out while the player keeps dribbling; the timeout/loss clearing is the
+// general mechanism that future one-shot pass/shot actions will rely on.
+type PendingAction struct {
+	Kind ActionKind
+	Dir  Vec3    // committed knock direction (X/Z unit); future: pass/shot aim
+	Age  float64 // seconds since armed; advanced each tick, used for the timeout
+}
+
 // World is one match's authoritative simulation state: it owns all players and
 // the ball, and tracks possession via Owner ("" = free ball). The game/room
 // layer wraps it with identity and a tick loop; World itself is pure state +
@@ -45,16 +70,31 @@ type World struct {
 	Owner   string // player ID in possession, or "" for a free ball
 	Bounds  Bounds
 
-	gainCooldown  float64 // seconds remaining before a possession gain may occur
-	touchCooldown float64 // seconds remaining before the next dribble touch may fire
-	touchCount    int     // monotonic count of dribble touches (surfaced for clients)
-	dribbleFacing Vec3    // owner's facing on the previous dribble tick (detects turns)
+	gainCooldown float64 // seconds remaining before a possession gain may occur
+	touchCount   int     // monotonic count of dribble touches (surfaced for clients)
+
+	pending PendingAction // 1-deep action register: the queued touch (later: pass/shot)
+	atFeet  bool          // ball within touchFireRadius of the owner this tick (snapshot contact flag)
 }
 
 // TouchCount returns the running total of dribble touches taken in this world. It
 // only ever increases; clients diff it between snapshots to know a touch happened
 // (and play the matching animation) without needing the exact tick.
 func (w *World) TouchCount() int { return w.touchCount }
+
+// AtFeet reports whether the ball was within touchFireRadius of the owner on the
+// last step (false when there is no owner). It pulses true on contact and false
+// while the ball is knocked ahead, and is what gates touch/action execution —
+// "conservative possession" without making ownership itself fragile.
+func (w *World) AtFeet() bool { return w.atFeet }
+
+// armPending sets the pending action to a fresh intent (Age reset to 0).
+func (w *World) armPending(kind ActionKind, dir Vec3) {
+	w.pending = PendingAction{Kind: kind, Dir: dir}
+}
+
+// clearPending empties the pending-action slot.
+func (w *World) clearPending() { w.pending = PendingAction{} }
 
 // NewWorld creates an empty world with a free ball resting at the origin.
 func NewWorld(bounds Bounds) *World {
@@ -143,8 +183,8 @@ func (w *World) tryGainPossession() {
 	for id, p := range w.Players {
 		if p.Pos.Sub(w.Ball.Pos).LengthXZ() <= ControlRadius {
 			w.Owner = id
-			w.Ball.Vel = Vec3{}     // corral: kill the free velocity
-			w.dribbleFacing = Vec3{} // fresh possession: no previous facing to turn from
+			w.Ball.Vel = Vec3{} // corral: kill the free velocity
+			w.clearPending()    // fresh possession: no queued action carried over
 			w.gainCooldown = possessionGainCooldown
 			return
 		}
@@ -153,21 +193,32 @@ func (w *World) tryGainPossession() {
 
 // stepDribble advances a dribble as a sequence of discrete TOUCHES instead of
 // gluing the ball to the feet. Each tick the ball rolls under dribbleRollDrag
-// (keeping real momentum the instant it's released) while the owner runs after
-// it. A touch fires only once the foot has REACHED the ball (within touchReach)
-// and the owner is moving — so the ball ONLY changes direction on a touch, never
-// the instant the player turns: to cut, you must catch the ball and knock it the
-// new way. A jog touch keeps the ball close (turns redirect on the next touch); a
-// SPRINT touch is heavy and knocks the ball loose — possession is released and
-// must be re-won by catching up to it, so cutting at full pace can lose the ball.
+// (keeping real momentum the instant it's released) while the owner runs after it.
+// The control objective is to keep the ball IN FRONT along the queued
+// (most-recent-input) direction: when its lead drops below frontMin the owner
+// knocks it back out to ~knockAhead in front, so the ball follows the player in any
+// direction, diagonals included, and a direction change redirects it on the next
+// touch. Possession is conservative: the touch won't reach a ball that has ended up
+// behind the feet (you turned away from it), and once the ball gets beyond
+// loseReach — knocked too hard by a SPRINT touch, or simply left behind — it is
+// released as a free ball to be re-won by chasing it down. See tuning.go for the
+// full rationale.
 func (w *World) stepDribble(in Input, dt float64) {
 	owner, ok := w.Players[w.Owner]
 	if !ok {
 		w.Owner = ""
+		w.clearPending()
 		return
 	}
-	if w.touchCooldown > 0 {
-		w.touchCooldown = max(0, w.touchCooldown-dt)
+
+	// Age the pending action and time it out if it's gone stale. A dribble touch
+	// is re-armed below every tick there's input, so this only bites a future
+	// one-shot action that can't reach the feet.
+	if w.pending.Kind != ActionNone {
+		w.pending.Age += dt
+		if w.pending.Age >= pendingActionMaxAge {
+			w.clearPending()
+		}
 	}
 
 	// Roll the ball with dribble drag, grounded (Y pinned to BallRadius).
@@ -180,62 +231,72 @@ func (w *World) stepDribble(in Input, dt float64) {
 	}
 	w.Ball.Pos = w.Bounds.Clamp(w.Ball.Pos)
 
-	// A touch needs a moving owner. (A stationary owner lets the ball settle at
-	// the feet.) Two ways to touch:
-	//   - running close: while running within touchReach of the ball, the owner
-	//     keeps knocking it along their running direction, paced by the anti-jitter
-	//     cooldown — so a ball at the feet always travels where the player heads,
-	//     and gradual curves are continuously re-aimed, not just sharp cuts.
-	//   - turn: a sharp change of direction redirects a ball that's a bit further
-	//     out (within turnReach) — bypassing the cooldown so the cut is immediate,
-	//     but only while the ball is reachable. Knock it too far (a sprint push)
-	//     and a turn can't get to it, so you lose it.
-	speed := owner.Vel.LengthXZ()
-	if speed <= epsilon {
-		return
+	// Arm/refresh the pending touch from LIVE movement input (latest-input-wins).
+	// On a zero-input tick we keep the last committed direction so a momentary gap
+	// doesn't wipe a queued cut; the timeout above is what eventually clears it.
+	moveDir := in.Dir.NormalizedXZ()
+	if moveDir.LengthXZ() > epsilon {
+		w.armPending(ActionTouch, moveDir)
 	}
+
+	// How far the ball is from the feet, and whether it reads as "at the feet" for
+	// the client. Possession is conservative: once the ball is beyond loseReach it is
+	// out of control — knocked too hard, or left behind because the player turned and
+	// ran away from it — so drop it to a free ball to be chased down.
 	rel := w.Ball.Pos.Sub(owner.Pos)
 	dist := rel.LengthXZ()
-
-	// A turn is the *edge* where the facing swings away from last tick (a cut), not
-	// a standing state — so it fires one redirect touch, then the knock's velocity
-	// curls the ball back in front while the cooldown suppresses re-touching. The
-	// turn touch bypasses the cooldown (so a cut is immediate) but still needs the
-	// ball within turnReach: knock it too far and a turn can't reach it.
-	turnedNow := w.dribbleFacing.LengthXZ() > epsilon &&
-		owner.Facing.DotXZ(w.dribbleFacing) < touchTurnAngleCos
-	w.dribbleFacing = owner.Facing
-
-	runningClose := w.touchCooldown <= 0 && dist <= touchReach
-	turned := turnedNow && dist <= turnReach
-	if !runningClose && !turned {
+	w.atFeet = dist <= touchFireRadius
+	if dist > loseReach {
+		w.Owner = ""
+		w.atFeet = false
+		w.clearPending()
+		w.gainCooldown = possessionGainCooldown
 		return
 	}
 
-	// Knock the ball toward a point a little further ahead than it already is,
-	// along the CURRENT (running) facing. The forward component always pushes the
-	// ball where the player is heading; the sideways component curls a ball that's
-	// drifted off-centre (e.g. after a turn) back in front instead of leaving it
-	// running parallel. Anchoring the target to the ball's own ahead-distance —
-	// rather than a fixed point off the feet — means we never aim *behind* a ball
-	// that's sitting further out than that point, so a touch is never backwards.
-	ahead := rel.DotXZ(owner.Facing) // signed distance the ball is ahead of the feet
-	target := owner.Pos.Add(owner.Facing.Scale(ahead + knockAhead))
+	// A touch needs a queued intent and a moving owner (a stationary owner lets the
+	// ball settle at the feet).
+	speed := owner.Vel.LengthXZ()
+	if w.pending.Kind != ActionTouch || speed <= epsilon {
+		return
+	}
+
+	// Keep the ball in front along the queued direction. Fire a touch when its lead
+	// has dropped below frontMin and it's within touchReach.
+	aim := w.pending.Dir
+	ahead := rel.DotXZ(aim) // signed distance the ball leads the feet along aim
+	if ahead >= frontMin || dist > touchReach {
+		return
+	}
+
+	// ...but you can only steer a ROLLING ball within the towardMin cone of its own
+	// travel: turn sharply off the ball's line and you're moving away from it, so we
+	// don't knock it — its momentum carries it on and the loseReach check above drops
+	// possession. A SLOW ball (at the feet, under control) can be knocked any
+	// direction: that's what lets you start dribbling and play tight cuts.
+	ballSpeed := w.Ball.Vel.LengthXZ()
+	if ballSpeed > slowBallCap && aim.DotXZ(w.Ball.Vel.NormalizedXZ()) < towardMin {
+		return
+	}
+
+	// Knock the ball toward a point ~knockAhead further ahead than it is now, along
+	// the queued direction. Anchoring the target to the ball's own lead means we never
+	// aim behind a ball that's already ahead, so a touch is never backwards.
+	target := owner.Pos.Add(aim.Scale(ahead + knockAhead))
 	dir := target.Sub(w.Ball.Pos).NormalizedXZ()
 	if dir.LengthXZ() < epsilon {
-		dir = owner.Facing
+		dir = aim
 	}
 	w.Ball.Vel = dir.Scale(TouchSpeed(speed, owner.Stats.Dribbling, in.Sprint))
-	w.touchCooldown = minTouchInterval
 	w.touchCount++
+	w.clearPending() // executed; it re-arms next tick from live input
 
-	// A sprint touch is loose: the ball is knocked free and must be recovered by
-	// catching up to it (the corral cooldown stops an instant re-grab). This is
-	// the risk of sprint-dribbling, and means a sprint turn can't redirect the
-	// ball on the spot — it's already gone.
+	// A sprint touch is heavy: it knocks the ball loose and releases possession, to be
+	// re-won by catching up (the gain cooldown stops an instant re-grab).
 	if in.Sprint {
 		w.Owner = ""
 		w.gainCooldown = possessionGainCooldown
+		w.clearPending()
 	}
 }
 
