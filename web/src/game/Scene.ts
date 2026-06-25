@@ -21,6 +21,7 @@ import {
   WebGLRenderer,
 } from 'three'
 import type { Snapshot } from '../net/protocol'
+import { createChargeIndicator } from './ChargeIndicator'
 import { createGoal } from './Goal'
 import { createPitch, PITCH_WIDTH } from './Pitch'
 import { createPlayer } from './Player'
@@ -34,6 +35,8 @@ const BALL_RADIUS = 0.15
 
 const COLOR_FREE = 0x3366ff // player tint when not possessing
 const COLOR_OWN = 0x33dd66 // player tint when possessing
+
+const INDICATOR_Y = 2.6 // height of the charge meter above a player (just over head height)
 
 // FIFA-style side broadcast camera. It sits set back behind the near touchline,
 // looking straight across the pitch, and follows the ball on BOTH ground axes so
@@ -94,6 +97,10 @@ export function createScene(canvas: HTMLCanvasElement): GameScene {
   const player = createPlayer(COLOR_FREE)
   scene.add(player.group)
 
+  // Kick-charge meter, floated above the player's head while charging.
+  const chargeIndicator = createChargeIndicator()
+  scene.add(chargeIndicator.group)
+
   // Ball.
   const ballGeometry = new SphereGeometry(BALL_RADIUS, 16, 12)
   const ballMaterial = new MeshStandardMaterial({ color: 0xffffff })
@@ -151,6 +158,11 @@ export function createScene(canvas: HTMLCanvasElement): GameScene {
       player.setKitColor(me.possessing ? COLOR_OWN : COLOR_FREE)
       possessing = me.possessing
 
+      // Float the charge meter above the player's head and drive it from the
+      // server's authoritative charge state (only shows while actually charging).
+      chargeIndicator.group.position.set(me.x, INDICATOR_Y, me.z)
+      chargeIndicator.update(me.chargePower, me.chargeSpin, me.chargeLift)
+
       // Estimate planar speed from the distance covered since the last snapshot,
       // smoothed, to drive the run cadence/stride.
       const t = clock.getElapsedTime()
@@ -195,6 +207,7 @@ export function createScene(canvas: HTMLCanvasElement): GameScene {
       goalRight.dispose()
       goalLeft.dispose()
       player.dispose()
+      chargeIndicator.dispose()
       ballGeometry.dispose()
       ballMaterial.dispose()
       renderer.dispose()

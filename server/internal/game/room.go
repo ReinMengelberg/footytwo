@@ -132,21 +132,25 @@ func (r *Room) snapshot() proto.Snapshot {
 	players := make([]proto.PlayerState, 0, len(w.Players))
 	for id, p := range w.Players {
 		players = append(players, proto.PlayerState{
-			ID:         id,
-			X:          p.Pos.X,
-			Z:          p.Pos.Z,
-			FacingX:    p.Facing.X,
-			FacingZ:    p.Facing.Z,
-			Possessing: w.Owner == id,
-			AtFeet:     w.Owner == id && w.AtFeet(),
+			ID:          id,
+			X:           p.Pos.X,
+			Z:           p.Pos.Z,
+			FacingX:     p.Facing.X,
+			FacingZ:     p.Facing.Z,
+			Possessing:  w.Owner == id,
+			AtFeet:      w.Owner == id && w.AtFeet(),
+			ChargePower: p.ChargePower(),
+			ChargeSpin:  p.ChargeSpin(),
+			ChargeLift:  p.ChargeLift(),
 		})
 	}
 	return proto.Snapshot{
 		Tick:    r.tick,
 		Owner:   w.Owner,
-		Ball:    proto.BallState{X: w.Ball.Pos.X, Y: w.Ball.Pos.Y, Z: w.Ball.Pos.Z},
+		Ball:    proto.BallState{X: w.Ball.Pos.X, Y: w.Ball.Pos.Y, Z: w.Ball.Pos.Z, Spin: w.Ball.Spin},
 		Players: players,
 		Touch:   w.TouchCount(),
+		Kick:    w.KickCount(),
 	}
 }
 

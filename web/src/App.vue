@@ -35,6 +35,9 @@ onMounted(() => {
       moveX: intent.moveX,
       moveZ: intent.moveZ,
       sprint: intent.sprint,
+      charge: intent.charge,
+      lift: intent.lift,
+      spin: intent.spin,
     }
     conn!.send(input)
   }, 1000 / SEND_HZ)
@@ -62,6 +65,7 @@ const statusLabel: Record<ConnStatus, string> = {
     <div class="inline-block rounded bg-black/40 px-3 py-2 leading-relaxed">
       <div class="font-semibold">footy · phase 2</div>
       <div>WASD to move · Shift to sprint</div>
+      <div>Space = kick (hold for power) · ↑ loft ↓ driven ←→ curve</div>
       <div>
         server:
         <span

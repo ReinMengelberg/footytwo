@@ -29,10 +29,16 @@ func clampF(v, lo, hi float64) float64 {
 
 // Input is a player's intent for a tick. Dir need not be normalized (Step
 // normalizes it so diagonals aren't faster). Sprint selects top speed and, when
-// possessing, looser ball control. Kick/pass come later.
+// possessing, looser ball control. Charge/Lift/Spin drive the charged kick: hold
+// Charge to build power, and while charging the arrow intents set the kick's
+// height (Lift) and curve (Spin). The server integrates hold-durations from these
+// per-tick booleans, so the client only reports current key state.
 type Input struct {
 	Dir    Vec3 // desired move direction, X/Z plane
 	Sprint bool // hold to sprint (top speed, looser control with the ball)
+	Charge bool // hold to build kick power; release commits the kick
+	Lift   int  // while charging: +1 = loft (into the air), -1 = driven (low), 0 = flat
+	Spin   int  // while charging: -1 = curve one way, +1 = the other, 0 = none
 }
 
 // ActionKind enumerates the queued ball actions a player can have pending. Only
@@ -44,20 +50,24 @@ type ActionKind uint8
 const (
 	ActionNone ActionKind = iota
 	ActionTouch
-	// ActionPass, ActionShot — later phases, once pass/shot inputs exist.
+	ActionKick // a committed charged kick: fires on the next foot-contact, then releases possession
 )
 
 // PendingAction is the 1-deep action register: the most recent committed intent
 // awaiting execution at the owner's feet. It is cleared on three events —
-// execution, timeout (Age >= pendingActionMaxAge), and loss of possession. For a
+// execution, timeout (Age past the kind's max), and loss of possession. For a
 // dribble touch the slot is continuously re-armed from live movement input each
 // tick (latest-input-wins), so its Dir is just the current heading and it never
-// times out while the player keeps dribbling; the timeout/loss clearing is the
-// general mechanism that future one-shot pass/shot actions will rely on.
+// times out while the player keeps dribbling. A committed ActionKick is the
+// opposite: a one-shot that the dribble re-arm must not clobber, carrying the
+// kick's power/loft/spin until the ball next reaches the feet.
 type PendingAction struct {
-	Kind ActionKind
-	Dir  Vec3    // committed knock direction (X/Z unit); future: pass/shot aim
-	Age  float64 // seconds since armed; advanced each tick, used for the timeout
+	Kind  ActionKind
+	Dir   Vec3    // committed direction (X/Z unit): dribble knock, or kick aim (facing at release)
+	Age   float64 // seconds since armed; advanced each tick, used for the timeout
+	Power float64 // kick only: charge seconds (floored) → horizontal launch speed
+	Loft  float64 // kick only: signed loft seconds (+loft / -driven)
+	Spin  float64 // kick only: signed spin seconds → Ball.Spin
 }
 
 // World is one match's authoritative simulation state: it owns all players and
@@ -72,6 +82,7 @@ type World struct {
 
 	gainCooldown float64 // seconds remaining before a possession gain may occur
 	touchCount   int     // monotonic count of dribble touches (surfaced for clients)
+	kickCount    int     // monotonic count of kicks (surfaced for clients)
 
 	pending PendingAction // 1-deep action register: the queued touch (later: pass/shot)
 	atFeet  bool          // ball within touchFireRadius of the owner this tick (snapshot contact flag)
@@ -81,6 +92,11 @@ type World struct {
 // only ever increases; clients diff it between snapshots to know a touch happened
 // (and play the matching animation) without needing the exact tick.
 func (w *World) TouchCount() int { return w.touchCount }
+
+// KickCount returns the running total of kicks taken in this world. Like
+// TouchCount it only increases; clients diff it between snapshots to fire a kick
+// animation/sound without needing the exact tick.
+func (w *World) KickCount() int { return w.kickCount }
 
 // AtFeet reports whether the ball was within touchFireRadius of the owner on the
 // last step (false when there is no owner). It pulses true on contact and false
@@ -140,6 +156,11 @@ func (w *World) Step(inputs map[string]Input, dt float64) {
 
 	w.tryGainPossession()
 
+	// Process kick charging after possession is resolved (so "possessing" is
+	// current) and before the dribble step (so a kick committed on release this
+	// tick is in the pending slot when stepDribble looks for a foot-contact).
+	w.stepCharge(inputs, dt)
+
 	if w.Owner != "" {
 		w.stepDribble(inputs[w.Owner], dt)
 	} else {
@@ -180,8 +201,20 @@ func (w *World) tryGainPossession() {
 	if w.Ball.Vel.LengthXZ() > corralSpeedCap {
 		return
 	}
+	if w.Ball.Pos.Y > BallRadius+groundEpsilon {
+		return // a ball in flight or mid-bounce can't be corralled
+	}
 	for id, p := range w.Players {
 		if p.Pos.Sub(w.Ball.Pos).LengthXZ() <= ControlRadius {
+			// A committed kick is struck FIRST-TIME: the player reaches the ball and
+			// kicks it straight away rather than taking it under control.
+			if p.kick.Kind == ActionKick {
+				w.launchKick(p, p.kick)
+				p.kick = PendingAction{}
+				w.kickCount++
+				w.gainCooldown = possessionGainCooldown
+				return
+			}
 			w.Owner = id
 			w.Ball.Vel = Vec3{} // corral: kill the free velocity
 			w.clearPending()    // fresh possession: no queued action carried over
@@ -189,6 +222,67 @@ func (w *World) tryGainPossession() {
 			return
 		}
 	}
+}
+
+// stepCharge integrates each player's kick wind-up. A player can charge at ANY
+// time, with or without the ball: while they hold Charge, power and the arrow-driven
+// loft/spin ramp with hold time (capped). On the release edge (was charging, no
+// longer) the kick is committed onto the player, where it waits to be consumed by
+// the player's next touch of the ball (a first-time strike on a loose ball, or the
+// next dribble contact). A committed kick ages out if no touch comes.
+func (w *World) stepCharge(inputs map[string]Input, dt float64) {
+	for id, p := range w.Players {
+		in := inputs[id]
+
+		// Age a committed kick; abandon it if no touch consumes it in time.
+		if p.kick.Kind != ActionNone {
+			p.kick.Age += dt
+			if p.kick.Age >= kickActionMaxAge {
+				p.kick = PendingAction{}
+			}
+		}
+
+		switch {
+		case in.Charge:
+			p.chargePower = min(p.chargePower+dt, maxChargeTime)
+			p.loftAccum = clampF(p.loftAccum+dt*sign(in.Lift), -maxLoftTime, maxLoftTime)
+			p.spinAccum = clampF(p.spinAccum+dt*sign(in.Spin), -maxSpinTime, maxSpinTime)
+		case p.wasCharging:
+			// Release edge: commit the kick (aimed along current facing), then reset.
+			power := max(p.chargePower, minChargeTime) // tap floor: a flick still passes
+			p.kick = PendingAction{Kind: ActionKick, Dir: p.Facing, Power: power, Loft: p.loftAccum, Spin: p.spinAccum}
+			p.chargePower, p.loftAccum, p.spinAccum = 0, 0, 0
+		}
+		p.wasCharging = in.Charge
+	}
+}
+
+// launchKick fires a committed kick: it overwrites the ball's velocity with the
+// launch computed from the kick's power (horizontal speed, minKickSpeed..max by
+// charge), loft (vertical speed, trading a little pace; a negative Loft is a driven
+// ball that stays flat and gains drivenBoost pace), and spin (lateral curve). The
+// ball launches from its current position along the committed aim; stepFreeBall
+// takes it from there under gravity, Magnus, and bounce.
+func (w *World) launchKick(owner *Player, k PendingAction) {
+	aim := k.Dir.NormalizedXZ()
+	if aim.LengthXZ() < epsilon {
+		aim = owner.Facing
+	}
+
+	horiz := lerp(minKickSpeed, maxKickSpeed, k.Power/maxChargeTime)
+	vertical := 0.0
+	switch {
+	case k.Loft > 0: // loft into the air, trading a little horizontal pace
+		lf := min(k.Loft, maxLoftTime) / maxLoftTime
+		vertical = lf * maxLoftSpeed
+		horiz *= 1 - loftHorizGive*lf
+	case k.Loft < 0: // driven: flat and faster
+		df := min(-k.Loft, maxLoftTime) / maxLoftTime
+		horiz *= 1 + drivenBoost*df
+	}
+
+	w.Ball.Vel = Vec3{aim.X * horiz, vertical, aim.Z * horiz}
+	w.Ball.Spin = clampF(k.Spin, -maxSpinTime, maxSpinTime) / maxSpinTime * maxSpin
 }
 
 // stepDribble advances a dribble as a sequence of discrete TOUCHES instead of
@@ -211,9 +305,10 @@ func (w *World) stepDribble(in Input, dt float64) {
 		return
 	}
 
-	// Age the pending action and time it out if it's gone stale. A dribble touch
-	// is re-armed below every tick there's input, so this only bites a future
-	// one-shot action that can't reach the feet.
+	// Age the pending touch and time it out if it's gone stale. The touch is
+	// re-armed below every tick there's input, so this rarely bites; it only clears
+	// a queued cut the owner stopped feeding. (A committed kick lives on the player,
+	// aged in stepCharge.)
 	if w.pending.Kind != ActionNone {
 		w.pending.Age += dt
 		if w.pending.Age >= pendingActionMaxAge {
@@ -251,6 +346,19 @@ func (w *World) stepDribble(in Input, dt float64) {
 		w.atFeet = false
 		w.clearPending()
 		w.gainCooldown = possessionGainCooldown
+		return
+	}
+
+	// The owner's committed kick fires as soon as the ball is in reach of the foot:
+	// launch it (in 3D), release possession, and block an instant self re-corral.
+	// This outranks the dribble touch, so it's checked first.
+	if owner.kick.Kind == ActionKick && dist <= touchReach {
+		w.launchKick(owner, owner.kick)
+		owner.kick = PendingAction{}
+		w.Owner = ""
+		w.atFeet = false
+		w.gainCooldown = possessionGainCooldown
+		w.kickCount++
 		return
 	}
 
@@ -300,16 +408,64 @@ func (w *World) stepDribble(in Input, dt float64) {
 	}
 }
 
-// stepFreeBall advances a free ball. Phase 1b: grounded with mild drag only —
-// gravity, Magnus, and bounce arrive in a later phase. Free physics is
-// suspended entirely while the ball is possessed and resumes on loss.
+// stepFreeBall advances a free ball as a full 3D body: gravity pulls it down,
+// side-spin curves it (Magnus), it bounces on landing and rolls out, and its spin
+// decays. Free physics is suspended while the ball is possessed and resumes on
+// loss (a kick, or a knocked-loose dribble). It runs in this order each tick:
+// gravity → Magnus → integrate → ground collision/bounce → drag → spin decay.
 func (w *World) stepFreeBall(dt float64) {
-	decay := math.Exp(-freeBallDrag * dt)
-	w.Ball.Vel = Vec3{w.Ball.Vel.X * decay, 0, w.Ball.Vel.Z * decay}
-	w.Ball.Pos = Vec3{
-		w.Ball.Pos.X + w.Ball.Vel.X*dt,
-		BallRadius,
-		w.Ball.Pos.Z + w.Ball.Vel.Z*dt,
+	b := &w.Ball
+
+	// Gravity on the vertical axis.
+	b.Vel.Y -= gravity * dt
+
+	// Magnus curve: a sideways acceleration perpendicular to horizontal travel,
+	// scaled by spin and speed. perp = (-Vel.Z, 0, Vel.X) is the left-rotation of
+	// the horizontal velocity about +Y, so +Spin curves a +Z-moving ball toward -X
+	// (the sign is pinned by TestSpinCurvesOppositeDirections). Applies in flight
+	// and on the ground.
+	hspeed := math.Hypot(b.Vel.X, b.Vel.Z)
+	if hspeed > epsilon && b.Spin != 0 {
+		perp := Vec3{-b.Vel.Z, 0, b.Vel.X}.Scale(1 / hspeed)
+		a := magnusFactor * b.Spin * hspeed
+		b.Vel.X += perp.X * a * dt
+		b.Vel.Z += perp.Z * a * dt
 	}
-	w.Ball.Pos = w.Bounds.Clamp(w.Ball.Pos)
+
+	// Integrate all three axes.
+	b.Pos.X += b.Vel.X * dt
+	b.Pos.Y += b.Vel.Y * dt
+	b.Pos.Z += b.Vel.Z * dt
+
+	// Ground collision: clamp out of the floor and bounce a descending ball. Tiny
+	// post-bounce hops settle to a roll so the ball doesn't buzz forever.
+	grounded := false
+	if b.Pos.Y <= BallRadius {
+		b.Pos.Y = BallRadius
+		if b.Vel.Y < 0 {
+			b.Vel.Y = -b.Vel.Y * restitution
+			if b.Vel.Y < bounceSettleCap {
+				b.Vel.Y = 0
+			}
+		}
+		grounded = true
+	}
+
+	// Horizontal drag: real roll drag on the deck, only a light drag aloft so a
+	// lofted ball keeps its pace through the air. Gravity is the only vertical force.
+	hdrag := airDrag
+	if grounded {
+		hdrag = freeBallDrag
+	}
+	decay := math.Exp(-hdrag * dt)
+	b.Vel.X *= decay
+	b.Vel.Z *= decay
+
+	// Spin bleeds off over time.
+	b.Spin *= math.Exp(-spinDecay * dt)
+	if math.Abs(b.Spin) < spinSettleCap {
+		b.Spin = 0
+	}
+
+	b.Pos = w.Bounds.Clamp(b.Pos)
 }

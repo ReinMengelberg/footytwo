@@ -36,7 +36,7 @@ const (
 	corralSpeedCap         = 6.0  // ball must be slower than this (m/s) to be corralled
 	possessionGainCooldown = 0.3  // seconds after a gain before another may occur
 
-	freeBallDrag = 1.5 // per-second ground drag on a free ball
+	freeBallDrag = 0.7 // per-second ground drag on a free ball (lower = rolls further)
 )
 
 // statFraction maps a 0–99 stat onto [0, 1], clamping defensively so callers
@@ -160,3 +160,55 @@ func TouchSpeed(ownerSpeed float64, dribbling int, sprint bool) float64 {
 	}
 	return max(v, touchPushFloor)
 }
+
+// Charged kick + free-ball 3D flight. A kick is committed by holding Space (power
+// = hold time, capped at maxChargeTime) and released; arrow keys held while
+// charging set loft/drive (Lift) and curve (Spin), each ramping with hold time
+// (capped at maxLoftTime / maxSpinTime). On the next foot-contact the ball is
+// launched: horizontal speed lerps minKickSpeed..maxKickSpeed by power; loft adds
+// vertical speed (and trades a little pace, loftHorizGive); a driven ball stays
+// flat and gains drivenBoost pace. Once free the ball flies under gravity, curves
+// via Magnus (magnusFactor), bounces on landing (restitution; tiny bounces settle
+// under bounceSettleCap), rolls under freeBallDrag (light airDrag aloft), and its
+// spin decays (spinDecay). groundEpsilon gates corralling to grounded balls only.
+const (
+	gravity         = 9.81 // m/s² downward on Vel.Y
+	restitution     = 0.45 // fraction of vertical speed kept on a bounce
+	bounceSettleCap = 0.40 // m/s: a post-bounce |Vel.Y| below this settles to rest
+	magnusFactor    = 0.22 // 1/s: lateral accel = magnusFactor * Spin * horizSpeed (lower = less curve)
+	airDrag         = 0.18 // per-second horizontal drag while airborne (light)
+	spinDecay       = 0.9  // per-second exponential decay of Spin
+	spinSettleCap   = 0.05 // |Spin| below this is zeroed
+	maxSpin         = 6.0  // cap on |Ball.Spin| set at launch
+	groundEpsilon   = 1e-3 // ball counts as grounded within this height (m) of the deck
+
+	minKickSpeed  = 8.0  // m/s horizontal at a tap (minimum charge)
+	maxKickSpeed  = 50.0 // m/s horizontal at full charge (a hard shot)
+	maxLoftSpeed  = 9.0  // m/s vertical at full loft (~4m apex)
+	drivenBoost   = 0.35 // up to +35% horizontal pace on a fully-driven low ball
+	loftHorizGive = 0.25 // lofting trades up to 25% horizontal pace for height
+)
+
+// Charge timing: how long each key must be held (seconds) for full effect.
+const (
+	minChargeTime    = 0.08 // tap floor: even a flick produces a real pass
+	maxChargeTime    = 1.0  // power caps after holding Space this long
+	maxLoftTime      = 0.7  // loft/driven caps after this long on ArrowUp/Down
+	maxSpinTime      = 0.7  // spin caps after this long on ArrowLeft/Right
+	kickActionMaxAge = 2.5  // seconds a committed kick waits for the next touch before timing out
+)
+
+// sign returns -1, 0, or +1 for a negative, zero, or positive int.
+func sign(n int) float64 {
+	switch {
+	case n > 0:
+		return 1
+	case n < 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
+// lerp linearly interpolates a..b by t, clamped to [0,1].
+func lerp(a, b, t float64) float64 { return a + (b-a)*clampF(t, 0, 1) }

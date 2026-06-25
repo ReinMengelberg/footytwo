@@ -61,6 +61,9 @@ func Handler(room *game.Room) http.Handler {
 			room.SetInput(boundPlayer, physics.Input{
 				Dir:    physics.Vec3{X: in.MoveX, Z: in.MoveZ},
 				Sprint: in.Sprint,
+				Charge: in.Charge,
+				Lift:   in.Lift,
+				Spin:   in.Spin,
 			})
 		}
 	})
